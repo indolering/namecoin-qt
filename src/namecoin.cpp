@@ -846,8 +846,16 @@ Value name_filter(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() > 5)
         throw runtime_error(
-                "name_filter [regexp] [maxage=36000] [from=0] [nb=0] [stat]\n"
+                "name_filter [[[[[regexp] maxage=36000] from=0] nb=0] stat]\n"
                 "scan and filter names\n"
+                "[regexp] : apply [regexp] on names, empty means all names\n"
+                "[maxage] : look in last [maxage] blocks\n"
+                "[from] : show results from number [from]\n"
+                "[nb] : show [nb] results, 0 means all\n"
+                "[stats] : show some stats instead of results\n"
+                "name_filter \"\" 5 # list names updated in last 5 blocks\n"
+                "name_filter \"^id/\" # list all names from the \"id\" namespace\n"
+                "name_filter \"^id/\" 36000 0 0 stat # display stats (number of names) on active names from the \"id\" namespace\n"
                 );
 
     string strRegexp;
@@ -883,15 +891,17 @@ Value name_filter(const Array& params, bool fHelp)
     if (!dbName.ScanNames(vchName, 100000000, nameScan))
         throw JSONRPCError(RPC_WALLET_ERROR, "scan failed");
 
+    // compile regex once
+    using namespace boost::xpressive;
+    smatch nameparts;
+    sregex cregex = sregex::compile(strRegexp);
+
     pair<vector<unsigned char>, CNameIndex> pairScan;
     BOOST_FOREACH(pairScan, nameScan)
     {
         string name = stringFromVch(pairScan.first);
 
         // regexp
-        using namespace boost::xpressive;
-        smatch nameparts;
-        sregex cregex = sregex::compile(strRegexp);
         if(strRegexp != "" && !regex_search(name, nameparts, cregex))
             continue;
 
@@ -908,22 +918,19 @@ Value name_filter(const Array& params, bool fHelp)
             continue;
 
         Object oName;
-        oName.push_back(Pair("name", name));
-        CTransaction tx;
-        CDiskTxPos txPos = txName.txPos;
-        if ((nHeight + GetDisplayExpirationDepth(nHeight) - pindexBest->nHeight <= 0)
-            || txPos.IsNull()
-            || !tx.ReadFromDisk(txPos))
-            //|| !GetValueOfNameTx(tx, vchValue))
-        {
-            oName.push_back(Pair("expired", 1));
-        }
-        else
-        {
-            vector<unsigned char> vchValue = txName.vValue;
-            string value = stringFromVch(vchValue);
-            oName.push_back(Pair("value", value));
-            oName.push_back(Pair("expires_in", nHeight + GetDisplayExpirationDepth(nHeight) - pindexBest->nHeight));
+        if (!fStat) {
+            oName.push_back(Pair("name", name));
+	        int nExpiresIn = nHeight + GetDisplayExpirationDepth(nHeight) - pindexBest->nHeight;
+            if (nExpiresIn <= 0)
+            {
+                oName.push_back(Pair("expired", 1));
+            }
+            else
+            {
+                string value = stringFromVch(txName.vValue);
+                oName.push_back(Pair("value", value));
+                oName.push_back(Pair("expires_in", nExpiresIn));
+            }
         }
         oRes.push_back(oName);
 
@@ -937,7 +944,7 @@ Value name_filter(const Array& params, bool fHelp)
         dbName.test();
     }
 
-    if(fStat)
+    if (fStat)
     {
         Object oStat;
         oStat.push_back(Pair("blocks",    (int)nBestHeight));

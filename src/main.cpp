@@ -27,7 +27,7 @@ CCriticalSection cs_mapTransactions;
 unsigned int nTransactionsUpdated = 0;
 map<COutPoint, CInPoint> mapNextTx;
 
-map<uint256, CBlockIndex*> mapBlockIndex;
+CMapBlockIndex mapBlockIndex;
 uint256 hashGenesisBlock("0x000000000062b72c5e2ceb45fbc8587e807c155b0da735e6483dfba2f0a9c770");
 CBigNum bnProofOfWorkLimit(~uint256(0) >> 32);
 const int nInitialBlockThreshold = 120; // Regard blocks up until N-threshold as "initial download"
@@ -748,19 +748,40 @@ int64 static GetBlockValue(int nHeight, int64 nFees)
     return nSubsidy + nFees;
 }
 
-unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast)
+unsigned int static GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlock *pblock)
 {
     const int64 nTargetTimespan = 14 * 24 * 60 * 60; // two weeks
     const int64 nTargetSpacing = 10 * 60;
     const int64 nInterval = nTargetTimespan / nTargetSpacing;
 
+    unsigned int nProofOfWorkLimit = bnProofOfWorkLimit.GetCompact();
+
     // Genesis block
     if (pindexLast == NULL)
-        return bnProofOfWorkLimit.GetCompact();
+        return nProofOfWorkLimit;
 
     // Only change once per interval
     if ((pindexLast->nHeight+1) % nInterval != 0)
+    {
+        // Special rules for testnet after 15 Mar 2014:
+        if (fTestNet && pblock->nTime > 1394838000)
+        {
+            // If the new block's timestamp is more than 2* 10 minutes
+            // then allow mining of a min-difficulty block.
+            if (pblock->nTime - pindexLast->nTime > nTargetSpacing*2)
+                return nProofOfWorkLimit;
+            else
+            {
+                // Return the last non-special-min-difficulty-rules-block
+                const CBlockIndex* pindex = pindexLast;
+                while (pindex->pprev && pindex->nHeight % nInterval != 0 && pindex->nBits == nProofOfWorkLimit)
+                    pindex = pindex->pprev;
+                return pindex->nBits;
+            }
+        }
+
         return pindexLast->nBits;
+    }
 
     // Go back the full period unless it's the first retarget after genesis. Code courtesy of ArtForz
 
@@ -1073,9 +1094,6 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPoo
 
         if (!hooks->ConnectInputs(txdb, mapTestPool, *this, vTxPrev, vTxindex, pindexBlock, posThisTx, fBlock, fMiner))
             return false;
-
-        if (nValueIn < GetValueOut())
-            return error("ConnectInputs() : %s value in < value out", GetHash().ToString().substr(0,10).c_str());
 
         // Tally transaction fees
         int64 nTxFee = nValueIn - GetValueOut();
@@ -1528,7 +1546,7 @@ bool CBlock::AcceptBlock()
     int nHeight = pindexPrev->nHeight+1;
 
     // Check proof of work
-    if (nBits != GetNextWorkRequired(pindexPrev))
+    if (nBits != GetNextWorkRequired(pindexPrev, this))
         return error("AcceptBlock() : incorrect proof of work");
 
     // Check timestamp against prev
@@ -3127,7 +3145,7 @@ CBlock* CreateNewBlock(CReserveKey& reservekey)
     pblock->hashPrevBlock  = pindexPrev->GetBlockHash();
     pblock->hashMerkleRoot = pblock->BuildMerkleTree();
     pblock->nTime          = max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
-    pblock->nBits          = GetNextWorkRequired(pindexPrev);
+    pblock->nBits          = GetNextWorkRequired(pindexPrev, pblock.get());
     pblock->nNonce         = 0;
 
     return pblock.release();
@@ -3463,4 +3481,11 @@ std::string CBlockIndex::ToString() const
             GetBlockHash().ToString().substr(0,20).c_str(),
             (auxpow.get() != NULL) ? auxpow->GetParentBlockHash().ToString().substr(0,20).c_str() : "-"
             );
+}
+
+CMapBlockIndex::~CMapBlockIndex ()
+{
+    printf ("Freeing %d entries in CMapBlockIndex...\n", size ());
+    for (iterator i = begin (); i != end (); ++i)
+        delete i->second;
 }
